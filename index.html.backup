@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chain-IQ Application</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(145deg, #0a0a0f 0%, #121218 100%);
+            color: #f0f0f5;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            text-align: center;
+            max-width: 600px;
+            padding: 2rem;
+        }
+        
+        h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            color: #ffd75a;
+            margin-bottom: 1rem;
+        }
+        
+        p {
+            font-size: 1.2rem;
+            color: #a0a0b0;
+            margin-bottom: 3rem;
+            line-height: 1.6;
+        }
+        
+        .nav-buttons {
+            display: flex;
+            gap: 2rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        .nav-button {
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #5a8cff, #4a77e0);
+            color: white;
+            font-weight: 600;
+            font-size: 1.1rem;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(90, 140, 255, 0.3);
+        }
+        
+        .nav-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(90, 140, 255, 0.4);
+        }
+        
+        .admin-button {
+            background: linear-gradient(135deg, #ffd75a, #f0b90b);
+            color: #000;
+            box-shadow: 0 4px 15px rgba(255, 215, 90, 0.3);
+        }
+        
+        .admin-button:hover {
+            box-shadow: 0 8px 25px rgba(255, 215, 90, 0.4);
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2rem;
+            }
+            
+            .nav-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .nav-button {
+                width: 100%;
+                max-width: 300px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chain-IQ</h1>
+        <p>Next-Generation Crypto Wallet Platform</p>
+        
+        <div class="nav-buttons">
+            <a href="/Chain-IQ.html" class="nav-button">
+                <span>💳</span>
+                Wallet Application
+            </a>
+            <a href="/Backoffice.html" class="nav-button admin-button">
+                <span>⚙️</span>
+                Admin Panel
+            </a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,1475 @@
+Complete, Exhaustive Production Documentation — MySQL + PHP Backend + adminApi.js Client Layer
+
+Note: this documentation replaces and expands your earlier mock-DB specification (the document you uploaded). I build on that design and convert every behavior, requirement, and edge case into a production-quality, fully specified implementation plan. (Reference: your original mock spec.) 
+
+Documantation
+
+ 
+
+Documantation
+
+What this file contains (no summary) — the pages that follow are an unabridged, explicit specification and implementation guide covering:
+
+Full architecture and data flow (every component, every interface).
+
+Fully-specified API contract for every admin operation (methods, URLs, payloads, responses, headers, error codes).
+
+Production-ready adminApi.js (complete code) to plug into your UI.
+
+PHP backend structure, code patterns, helper libraries, and full example endpoint implementations (secure, transactional, concurrency-safe).
+
+MySQL schema DDL (complete CREATE TABLE statements including constraints and indexes).
+
+Detailed, line-by-line transaction and race-condition handling (SELECT ... FOR UPDATE, SKIP LOCKED, idempotency).
+
+Security and operational hardening (auth, JWT, password handling, encryption, CORS, CSRF mitigation, secret management).
+
+Real-time design for notifications & transactions (pub/sub, websockets, alternatives).
+
+Background job architecture, CSV import/export strategy, file uploads (KYC) and storage (S3), scanning.
+
+Observability: logging, metrics, backups, DR, monitoring.
+
+QA, testing strategies, and migration / deployment guidance.
+
+Code examples for common flows: createTransaction, approveKyc, assignDepositAddress, issueCard, resetPassword (secure), recordAuditLog.
+
+Appendices: recommended environment variables, indexes, and a long checklist for production readiness.
+
+1. Architecture (complete, explicit)
+
+The system is split into four logical layers and a few optional supporting systems. Each is described in exhaustive detail below.
+
+Client UI (React / Vue / plain JS)
+
+Renders admin panels; calls only functions exposed by the client-side API module adminApi.js.
+
+UI must never directly query the backend endpoints. All calls go through adminApi.js. The UI expects consistent JSON contracts, error shapes, and token-based auth.
+
+Client API Layer – adminApi.js
+
+A single JS module (ES module or CommonJS) containing all client-facing API functions: getUsers(), createTransaction(), approveKyc(), assignDepositAddress(), getCards(), etc.
+
+Responsibilities:
+
+Provide typed request/response contract (documented below).
+
+Attach Authorization header (Bearer <token>).
+
+Provide retry/backoff for idempotent read-only calls if desired.
+
+Expose error types to UI (network error, auth error, domain error, validation error).
+
+Provide helper for optimistic UI updates and for reversing on failure.
+
+Manage token refresh flow (refresh token pattern) and automatic logout on invalid refresh.
+
+PHP Backend (REST API)
+
+Each client function maps to a PHP route (preferably under /api/*).
+
+Backend responsibilities:
+
+Authenticate and authorize requests.
+
+Validate inputs strictly.
+
+Perform business logic and DB updates atomically using DB transactions.
+
+Return consistent error format and HTTP codes.
+
+Record audit logs for every admin action.
+
+Emit notifications (DB insert + optional push to websocket pub/sub).
+
+Put heavy tasks in background jobs (CSV import, KYC verification, image conversions).
+
+MySQL Database
+
+Stores normalized, relational data with constraints and indexes to preserve integrity.
+
+All balance updates and business-critical writes use transactional patterns to ensure atomicity and consistency (ACID).
+
+Supporting Infrastructure (optional but strongly recommended)
+
+Redis: caching and pub/sub (fast notification push).
+
+Object storage (S3): KYC files and other blobs; keep only metadata in DB.
+
+Queue / Worker: RabbitMQ, Redis Queue, or Laravel Queue + worker supervisors for processing CSV imports, KYC checks, heavy jobs.
+
+WebSocket server: Push real-time notifications (can be NodeJS, Ratchet PHP, or managed service like Pusher).
+
+Monitoring/Logging: Prometheus/Grafana, Sentry, ELK/Opensearch.
+
+2. Security fundamentals (explicit rules — follow these)
+
+Transport: HTTPS only (TLS 1.2+). HSTS header. Redirect HTTP → HTTPS.
+
+Authentication: JWT (stateless) or HttpOnly secure refresh-token cookies + short-lived access token. Use Authorization: Bearer <access> header for API calls. Use rotating refresh tokens.
+
+Passwords: never store plaintext. Use password_hash with PASSWORD_ARGON2ID (if unavailable, PASSWORD_BCRYPT). Always use password_verify for checks. No viewPassword operation — only resetPassword (server generates a one-time reset token or sends a secure reset link). If you must generate a password for admin viewing for QA, store encrypted with a KMS-managed key and strictly log every access. (Production risk: avoid.)
+
+SQL: Prepared statements / parameterized queries (PDO with emulation disabled). No direct string interpolation into SQL.
+
+Least Privilege DB user: DB credentials used by API should have only required permissions (INSERT/SELECT/UPDATE on app schema). Admin-level operations (DB backups) use separate credentials.
+
+Input validation & output encoding: Strict server-side validation (never rely on client). Escape/encode output when used in HTML contexts.
+
+CSRF: For cookie-based auth, use CSRF tokens. For Bearer token auth, CSRF is less relevant but check for allowed origins.
+
+CORS: Implement strict CORS policy (only allow admin UI origin(s)).
+
+Rate limiting: Apply per-IP and per-token limits for write endpoints (e.g., 10 requests/min for transactional endpoints).
+
+Audit logs: Immutable audit log table (append-only). Write a DB-level trigger or always write via server code. Audit entries must include X-Request-ID, admin_id, action, target, IP, user-agent, timestamp.
+
+Secrets: Use environment variables and secret manager (AWS Secrets Manager, Vault). Never commit secrets or keys in code. Rotate keys regularly.
+
+File upload (KYC): Virus-scan files; store in S3 (private bucket); set appropriate content-disposition; store only metadata in DB; create presigned URLs for downloads with short TTL.
+
+3. Environment & deployment variables (explicit list)
+
+Use a .env or platform-managed env. Required variables:
+
+APP_ENV=production|staging|development
+APP_DEBUG=false
+APP_URL=https://admin.example.com
+
+DB_HOST=...
+DB_PORT=3306
+DB_NAME=...
+DB_USER=...
+DB_PASS=...
+
+JWT_SECRET=<strong random 32+ byte base64 or hex>
+JWT_ALGO=HS256
+
+REDIS_URL=redis://:pass@host:6379
+
+AWS_S3_BUCKET=...
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=...
+
+MAIL_HOST=...
+MAIL_PORT=...
+MAIL_USER=...
+MAIL_PASS=...
+
+LOG_LEVEL=info
+
+# Optional
+IDEMPOTENCY_KEY_CACHE_TTL=3600
+
+4. Database schema (complete DDL)
+
+The schema below is opinionated and normalized. It includes constraints, indexes, and comments on why each column exists.
+
+-- Use utf8mb4 for emoji support
+CREATE DATABASE IF NOT EXISTS admin_app CHARACTER SET = 'utf8mb4' COLLATE = 'utf8mb4_unicode_ci';
+USE admin_app;
+
+-- USERS
+CREATE TABLE users (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(254) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  name VARCHAR(200),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  verified_status TINYINT(1) DEFAULT 0,
+  metadata JSON DEFAULT NULL
+);
+
+-- BALANCES (multi-asset balances per user)
+CREATE TABLE balances (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  asset VARCHAR(32) NOT NULL,
+  balance DECIMAL(36,8) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY ux_user_asset (user_id, asset),
+  INDEX idx_user (user_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- TRANSACTIONS
+CREATE TABLE transactions (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  transaction_uuid CHAR(36) NOT NULL UNIQUE, -- for idempotency and correlation
+  user_id BIGINT UNSIGNED NOT NULL,
+  admin_id BIGINT UNSIGNED NULL, -- admin performing action (nullable if user-initiated)
+  asset VARCHAR(32) NOT NULL,
+  amount DECIMAL(36,8) NOT NULL,
+  type ENUM('credit','debit','deposit','withdrawal','conversion','fee','adjustment') NOT NULL,
+  reference VARCHAR(255) NULL, -- optional note / external id
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user_time (user_id, created_at),
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- KYC SUBMISSIONS
+CREATE TABLE kyc_submissions (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  status ENUM('pending','approved','rejected') DEFAULT 'pending',
+  reason TEXT NULL,
+  document_url VARCHAR(1024) NULL, -- S3 or internal path
+  submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  decided_at TIMESTAMP NULL DEFAULT NULL,
+  decided_by BIGINT UNSIGNED NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- CARDS
+CREATE TABLE cards (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  type VARCHAR(64) NOT NULL,
+  limit_amount DECIMAL(36,8) DEFAULT NULL,
+  status ENUM('active','frozen','cancelled') DEFAULT 'active',
+  issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- DEPOSIT ADDRESSES POOL
+CREATE TABLE deposit_addresses (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  asset VARCHAR(32) NOT NULL,
+  address VARCHAR(255) NOT NULL,
+  assigned_to BIGINT UNSIGNED NULL, -- user_id
+  assigned_at TIMESTAMP NULL DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX ux_asset_address (asset, address),
+  FOREIGN KEY (assigned_to) REFERENCES users(id)
+);
+
+-- NOTIFICATIONS
+CREATE TABLE notifications (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NULL, -- NULL means broadcast
+  title VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+  is_read TINYINT(1) DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user_read (user_id, is_read)
+);
+
+-- FEES
+CREATE TABLE fees (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NULL, -- null = default/global
+  fee_type VARCHAR(100) NOT NULL,
+  value DECIMAL(18,8) NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- AUDIT LOGS (append-only)
+CREATE TABLE audit_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  admin_id BIGINT UNSIGNED NULL,
+  action VARCHAR(255) NOT NULL,
+  target_type VARCHAR(100) NULL,
+  target_id VARCHAR(255) NULL,
+  meta JSON NULL,
+  ip VARCHAR(45) NULL,
+  user_agent VARCHAR(1024) NULL,
+  request_id CHAR(36) NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CRYPTO PRICES (cache)
+CREATE TABLE crypto_prices (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  asset VARCHAR(64) NOT NULL UNIQUE,
+  price_usd DECIMAL(30,8) NOT NULL,
+  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+
+Notes about the schema
+
+transaction_uuid is mandatory for idempotent writes; client should send Idempotency-Key header or transaction_uuid in payload to prevent double-processing.
+
+balances table uses a unique constraint (user_id, asset) for atomic updates; lock the row for updates during transactions (SELECT ... FOR UPDATE).
+
+deposit_addresses assigned via FOR UPDATE SKIP LOCKED to avoid race conditions across workers.
+
+audit_logs is append-only; do not update or delete rows.
+
+5. API Contracts (complete for each operation)
+
+All endpoints live under /api/. Use JSON requests and responses. Use HTTP status codes strictly:
+
+200 OK — success (GET/PUT returning resource)
+
+201 Created — resource created (POST)
+
+204 No Content — success with no body (DELETE)
+
+400 Bad Request — validation or malformed payload
+
+401 Unauthorized — missing/invalid token
+
+403 Forbidden — insufficient privileges
+
+404 Not Found — resource not present
+
+409 Conflict — duplicates, constraint violation, idempotency conflict
+
+422 Unprocessable Entity — business rule violation
+
+429 Too Many Requests — rate-limited
+
+500 — server error
+
+Standard response shape for errors
+
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Description of problem",
+    "details": {
+      "fieldName": "Detailed message"
+    }
+  }
+}
+
+
+Common headers
+
+Authorization: Bearer <token> (required)
+
+X-Request-ID: <uuid> (recommended; server echoes in response)
+
+Idempotency-Key: <uuid> (optional, recommended for POSTs that must be idempotent)
+
+5.1 Auth / Session
+POST /api/login.php
+
+Request:
+
+{
+  "email": "admin@example.com",
+  "password": "plaintext"
+}
+
+
+Response 200:
+
+{
+  "access_token": "<jwt>",
+  "expires_in": 1800,
+  "refresh_token": "<opaque-refresh-token>",
+  "user": { "id": 1, "email": "...", "name": "Admin" }
+}
+
+POST /api/refresh.php
+
+Request:
+
+{ "refresh_token": "<token>" }
+
+
+Response 200
+
+{ "access_token":"...", "expires_in":1800 }
+
+POST /api/logout.php
+
+Request: header Authorization, body optional { "refresh_token": "..." }
+Response: 204 No Content
+
+5.2 Users
+GET /api/getUsers.php?page=1&per_page=50
+
+Response 200:
+
+{
+  "data":[{ "id":1,"email":"a","name":"A","verified_status":1 }],
+  "meta":{ "page":1,"per_page":50,"total":123 }
+}
+
+POST /api/createUser.php
+
+Request:
+
+{ "email":"x@y.com", "name":"X", "password":"Passw0rd!" }
+
+
+Response 201 with created user (omit password fields).
+
+POST /api/updateUser.php
+
+Request:
+
+{ "id": 12, "name":"New", "metadata": { ... } }
+
+
+Response 200 with updated user object.
+
+POST /api/resetPassword.php
+
+Important: This endpoint should create a reset token and send via secure email — DO NOT return plaintext password in response. If admin-triggered, require confirmation dialog, log audit record password_reset_admin, and optionally email the user a secure reset link.
+
+Request:
+
+{ "user_id": 12 }
+
+
+Response 200:
+
+{ "message":"Reset link created and sent" }
+
+5.3 Transactions
+GET /api/getTransactions.php?userId=123&page=1&per_page=50
+
+Returns: paginated list of transactions.
+
+POST /api/createTransaction.php
+
+Request:
+
+{
+  "transaction_uuid": "uuid-v4",
+  "user_id": 123,
+  "asset": "BTC",
+  "amount": "0.05",
+  "type": "credit|debit|deposit|withdrawal|fee|conversion",
+  "reference": "optional text"
+}
+
+
+Server behavior (strict invariants):
+
+Validate the request and idempotency key (transaction_uuid).
+
+Begin DB transaction.
+
+Lock balances row: SELECT balance FROM balances WHERE user_id = :user_id AND asset = :asset FOR UPDATE.
+
+Check business rules (sufficient balance for debit/withdrawal).
+
+Update balances (UPDATE balances SET balance = balance + :delta).
+
+Insert into transactions.
+
+Insert into audit_logs.
+
+Commit.
+
+If any error occurs, rollback and return appropriate error code.
+
+Possible responses
+
+201 Created with inserted transaction.
+
+422 Unprocessable Entity if business rule violated.
+
+409 Conflict if transaction_uuid already used with conflicting payload.
+
+5.4 KYC
+GET /api/getKycSubmissions.php?status=pending&page=1
+
+Return pages of submissions.
+
+POST /api/approveKyc.php
+
+Request:
+
+{ "submission_id": 123, "admin_id": 1 }
+
+
+Server actions:
+
+Begin transaction.
+
+Update kyc_submissions status → approved, set decided_at and decided_by.
+
+Update users.verified_status = 1.
+
+Insert notifications to the user.
+
+Insert audit_logs.
+
+Commit.
+Return 200 with updated submission.
+
+POST /api/rejectKyc.php
+
+Request:
+
+{ "submission_id": 123, "admin_id": 1, "reason": "Invalid document" }
+
+
+Server actions: update status=rejected, set reason, insert notification & audit log, commit.
+
+5.5 Cards
+GET /api/getCards.php?userId=123
+POST /api/issueCard.php
+
+Request:
+
+{ "user_id": 123, "type":"virtual|physical", "limit":"1000.00" }
+
+
+Server actions:
+
+Begin DB transaction.
+
+Count existing cards for user SELECT COUNT(*) FROM cards WHERE user_id = :user_id FOR UPDATE.
+
+If count >=3 → return 422 with message max cards reached.
+
+Insert card row.
+
+Insert audit log.
+
+Commit.
+
+POST /api/freezeCard.php
+
+Request:
+
+{ "card_id": 42, "admin_id": 1 }
+
+
+Set status = frozen/unfreeze.
+
+5.6 Deposit Addresses
+GET /api/getDepositAddresses.php?asset=BTC&available=1
+
+Return pool or filtered addresses.
+
+POST /api/assignDepositAddress.php
+
+Request:
+
+{ "asset":"BTC", "user_id": 123 }
+
+
+Server steps (race-safe):
+
+Begin transaction.
+
+Use SELECT id, address FROM deposit_addresses WHERE asset = :asset AND assigned_to IS NULL FOR UPDATE SKIP LOCKED LIMIT 1.
+
+If using MySQL 8+, SKIP LOCKED prevents blocking other concurrent transactions trying to fetch addresses.
+
+If no record → return 422 / 409 → { error: "No address available" }.
+
+UPDATE deposit_addresses SET assigned_to = :user_id, assigned_at = NOW() WHERE id = :id.
+
+Insert audit log & notification.
+
+Commit.
+
+5.7 Notifications
+GET /api/getNotifications.php?userId=123&page=1
+
+Return both per-user and broadcast ones. Implementation detail: query WHERE user_id IS NULL OR user_id = :user_id.
+
+POST /api/createNotification.php
+
+Request:
+
+{ "user_id": 123 | null, "title": "...", "message": "..." }
+
+
+Server inserts notification and, optionally, publishes to websocket via Redis.
+
+5.8 Fees
+GET /api/getFees.php?userId=123
+
+Return default/global and per-user overrides. Server logic merges defaults + user overrides.
+
+POST /api/updateFees.php
+
+Request:
+
+{ "user_id": null | 123, "fees":[ { "fee_type":"withdrawal", "value":"0.001" } ] }
+
+
+Server updates fees table, logs audit.
+
+5.9 Audit Logs
+GET /api/getAuditLogs.php?page=1&per_page=100
+
+Filter by admin_id, action, target_type, date range.
+
+6. adminApi.js — production-ready client API module (full code)
+
+This file is intended to be dropped into your UI. It handles auth, tokens, idempotency-key header, retry for idempotent GETs, and consistent error translation.
+
+// adminApi.js
+const BASE_URL = (typeof process !== 'undefined' && process.env.API_BASE_URL) || '/api';
+const DEFAULT_TIMEOUT = 30_000; // ms
+
+function getToken() {
+  return localStorage.getItem('access_token');
+}
+function setToken(token) {
+  if (token) localStorage.setItem('access_token', token);
+  else localStorage.removeItem('access_token');
+}
+function getRefreshToken() {
+  return localStorage.getItem('refresh_token');
+}
+function setRefreshToken(rt) {
+  if (rt) localStorage.setItem('refresh_token', rt);
+  else localStorage.removeItem('refresh_token');
+}
+
+async function fetchJson(path, { method = 'GET', body = null, headers = {}, signal = null, idempotencyKey = null, expectStatus = [200] } = {}) {
+  const url = `${BASE_URL}${path}`;
+  const h = Object.assign({}, headers, { 'Accept': 'application/json' });
+  const token = getToken();
+  if (token) h['Authorization'] = `Bearer ${token}`;
+  if (idempotencyKey) h['Idempotency-Key'] = idempotencyKey;
+  if (body && !(body instanceof FormData)) {
+    h['Content-Type'] = 'application/json';
+    body = JSON.stringify(body);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
+  try {
+    const resp = await fetch(url, {
+      method,
+      headers: h,
+      body,
+      signal: signal || controller.signal,
+      credentials: 'same-origin'
+    });
+
+    // refresh token handling if unauthenticated
+    if (resp.status === 401) {
+      // try refresh flow once
+      const refreshed = await tryRefreshToken();
+      if (refreshed) {
+        // retry original request once
+        const token2 = getToken();
+        if (token2) h['Authorization'] = `Bearer ${token2}`;
+        const resp2 = await fetch(url, { method, headers: h, body, signal: signal || controller.signal, credentials: 'same-origin' });
+        return await handleResponse(resp2, expectStatus);
+      }
+      // otherwise return 401
+      return await handleResponse(resp, expectStatus);
+    }
+
+    return await handleResponse(resp, expectStatus);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function handleResponse(resp, expectStatus) {
+  const contentType = resp.headers.get('content-type') || '';
+  const requestId = resp.headers.get('x-request-id') || null;
+  let data = null;
+  if (contentType.includes('application/json')) {
+    data = await resp.json();
+  } else {
+    data = await resp.text();
+  }
+  if (!expectStatus.includes(resp.status)) {
+    const err = new Error('API Error');
+    err.status = resp.status;
+    err.body = data;
+    err.requestId = requestId;
+    throw err;
+  }
+  return { status: resp.status, data, requestId };
+}
+
+async function tryRefreshToken() {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+  try {
+    const res = await fetchJson('/refresh.php', { method: 'POST', body: { refresh_token: refreshToken }, expectStatus: [200] });
+    const { access_token, expires_in } = res.data;
+    setToken(access_token);
+    // optionally update refresh token if returned
+    if (res.data.refresh_token) setRefreshToken(res.data.refresh_token);
+    return true;
+  } catch (e) {
+    setToken(null);
+    setRefreshToken(null);
+    return false;
+  }
+}
+
+function uid() {
+  // small helper to create UUIDv4-like strings for idempotency keys
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// --- exported API methods ---
+
+export default {
+  // Auth
+  async login(email, password) {
+    const { data } = await fetchJson('/login.php', { method: 'POST', body: { email, password }, expectStatus: [200] });
+    setToken(data.access_token);
+    if (data.refresh_token) setRefreshToken(data.refresh_token);
+    return data;
+  },
+  async logout() {
+    const refresh_token = getRefreshToken();
+    try {
+      await fetchJson('/logout.php', { method: 'POST', body: { refresh_token }, expectStatus: [204,200] });
+    } catch (e) {
+      // ignore errors on logout; still clear tokens
+    } finally {
+      setToken(null);
+      setRefreshToken(null);
+    }
+  },
+
+  // Users
+  async getUsers(page=1, per_page=50) {
+    const res = await fetchJson(`/getUsers.php?page=${page}&per_page=${per_page}`, { expectStatus: [200] });
+    return res.data;
+  },
+  async createUser(payload) {
+    const idempotencyKey = uid();
+    const res = await fetchJson('/createUser.php', { method: 'POST', body: payload, idempotencyKey, expectStatus: [201] });
+    return res.data;
+  },
+  async updateUser(payload) {
+    const res = await fetchJson('/updateUser.php', { method: 'POST', body: payload, expectStatus: [200] });
+    return res.data;
+  },
+  async resetPassword(userId) {
+    // returns message; server will email user or log
+    const res = await fetchJson('/resetPassword.php', { method: 'POST', body: { user_id: userId }, expectStatus: [200] });
+    return res.data;
+  },
+
+  // Transactions
+  async getTransactions(userId, page=1, per_page=50) {
+    const res = await fetchJson(`/getTransactions.php?userId=${userId}&page=${page}&per_page=${per_page}`, { expectStatus: [200] });
+    return res.data;
+  },
+  async createTransaction(payload) {
+    // payload must include transaction_uuid
+    if (!payload.transaction_uuid) payload.transaction_uuid = uid();
+    const res = await fetchJson('/createTransaction.php', { method:'POST', body: payload, idempotencyKey: payload.transaction_uuid, expectStatus:[201] });
+    return res.data;
+  },
+
+  // KYC
+  async getKycSubmissions(page=1, per_page=50) {
+    const res = await fetchJson(`/getKycSubmissions.php?page=${page}&per_page=${per_page}`, { expectStatus:[200] });
+    return res.data;
+  },
+  async approveKyc(submission_id) {
+    const res = await fetchJson('/approveKyc.php', { method: 'POST', body: { submission_id }, expectStatus:[200] });
+    return res.data;
+  },
+  async rejectKyc(submission_id, reason) {
+    const res = await fetchJson('/rejectKyc.php', { method: 'POST', body: { submission_id, reason }, expectStatus:[200] });
+    return res.data;
+  },
+
+  // Cards
+  async getCards(userId) { const r = await fetchJson(`/getCards.php?userId=${userId}`, { expectStatus:[200] }); return r.data; },
+  async issueCard(payload) { const r = await fetchJson('/issueCard.php', { method:'POST', body: payload, expectStatus:[201] }); return r.data; },
+  async freezeCard(cardId) { const r = await fetchJson('/freezeCard.php', { method:'POST', body:{ card_id: cardId }, expectStatus:[200] }); return r.data; },
+
+  // Deposit Addresses
+  async getDepositAddresses(asset, onlyAvailable=false) {
+    let q = `/getDepositAddresses.php?asset=${encodeURIComponent(asset)}${onlyAvailable ? '&available=1' : ''}`;
+    const r = await fetchJson(q, { expectStatus:[200] });
+    return r.data;
+  },
+  async assignDepositAddress(userId, asset) {
+    const res = await fetchJson('/assignDepositAddress.php', { method: 'POST', body: { user_id: userId, asset }, expectStatus:[200,422] });
+    return res.data;
+  },
+
+  // Notifications
+  async getNotifications(userId, page=1, per_page=50) {
+    const res = await fetchJson(`/getNotifications.php?userId=${userId}&page=${page}&per_page=${per_page}`, { expectStatus:[200] });
+    return res.data;
+  },
+  async createNotification(payload) {
+    const res = await fetchJson('/createNotification.php', { method:'POST', body: payload, expectStatus:[201] });
+    return res.data;
+  },
+
+  // Fees & audit
+  async getFees(userId) { const r = await fetchJson(`/getFees.php?userId=${userId}`, { expectStatus:[200] }); return r.data; },
+  async updateFees(payload) { const r = await fetchJson('/updateFees.php', { method:'POST', body: payload, expectStatus:[200]}); return r.data; },
+  async getAuditLogs(page=1, per_page=100) { const r = await fetchJson(`/getAuditLogs.php?page=${page}&per_page=${per_page}`, { expectStatus:[200]}); return r.data; }
+};
+
+
+Notes & Best Practices for adminApi.js:
+
+Always include transaction_uuid for all writes that must be idempotent (transactions, card issuance, assign deposit address).
+
+The module above tries a token refresh once when encountering 401; you may implement concurrency-safe refresh (single refresh in progress across many simultaneous requests) using a queue.
+
+Consider exposing a mechanism to set a global "onAuthFailure" callback so UI can show login screen or toast.
+
+Use X-Request-ID on client side for correlation (generate UUID and attach to every request header; backend should echo it back).
+
+7. PHP backend — directory structure & utilities
+
+Suggested structure (PSR-4 / Composer-savvy simple app):
+
+/api
+  bootstrap.php        -- loads env, DB, auth
+  config.php
+  vendor/              -- composer vendor
+  public/
+    index.php          -- optional dispatch for frameworks
+  src/
+    Controllers/
+      AuthController.php
+      UsersController.php
+      TransactionsController.php
+      KycController.php
+      CardsController.php
+      NotificationsController.php
+    Services/
+      AuthService.php
+      NotificationService.php
+      TransactionService.php
+      KycService.php
+    Db/
+      Database.php     -- PDO singleton factory
+    Utils/
+      Response.php
+      Validator.php
+      AuditLogger.php
+  migrations/
+  scripts/
+
+
+Bootstrap (pseudo)
+
+Load .env (vlucas/phpdotenv)
+
+Configure PDO: PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_EMULATE_PREPARES => false
+
+Set up error handlers, JSON error output in non-production.
+
+Initialize Redis, S3 client (AWS SDK), and JWT library.
+
+8. PHP code examples (robust, secure, transactional)
+
+Below are real examples for critical flows. They use PDO, prepared statements, and full transaction semantics. They demonstrate how to do atomic balance updates and ensure no race conditions.
+
+Important: these are examples — adapt to your framework (Slim, Laravel, Symfony, plain PHP). They intentionally avoid framework-specific bootstrapping.
+
+8.1 createTransaction.php — atomic balance update
+<?php
+require_once __DIR__ . '/bootstrap.php'; // sets $pdo, $auth
+
+try {
+    $user = $auth->requireAdmin(); // or requireAuth()
+    $payload = json_decode(file_get_contents('php://input'), true);
+    if (!$payload) throwApiError(400, 'Malformed JSON');
+
+    // Validate payload
+    $txn_uuid = $payload['transaction_uuid'] ?? bin2hex(random_bytes(16));
+    $userId = (int)$payload['user_id'];
+    $asset = $payload['asset'] ?? null;
+    $amount = $payload['amount'] ?? null;
+    $type = $payload['type'] ?? null;
+    $reference = $payload['reference'] ?? null;
+
+    if (!$userId || !$asset || !$amount || !$type) throwApiError(400, 'Missing fields');
+
+    // Idempotency: check existing transaction_uuid
+    $stmt = $pdo->prepare('SELECT id, user_id, amount, asset FROM transactions WHERE transaction_uuid = :uuid');
+    $stmt->execute([':uuid' => $txn_uuid]);
+    if ($stmt->rowCount() > 0) {
+        $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+        // return existing transaction so client treats it idempotently
+        http_response_code(200);
+        echo json_encode(['transaction' => $existing]);
+        exit;
+    }
+
+    // Convert amount to decimal safely
+    $amountDecimal = (string) $amount;
+
+    // Begin transaction
+    $pdo->beginTransaction();
+
+    // Acquire balance row lock
+    $selectBalance = $pdo->prepare('SELECT id, balance FROM balances WHERE user_id = :user_id AND asset = :asset FOR UPDATE');
+    $selectBalance->execute([':user_id'=>$userId, ':asset'=>$asset]);
+
+    if ($selectBalance->rowCount() === 0) {
+        // Option: create balance row if missing
+        $insertBalance = $pdo->prepare('INSERT INTO balances (user_id, asset, balance) VALUES (:user_id, :asset, 0)');
+        $insertBalance->execute([':user_id'=>$userId, ':asset'=>$asset]);
+        $balanceId = $pdo->lastInsertId();
+        $currentBalance = '0';
+    } else {
+        $row = $selectBalance->fetch(PDO::FETCH_ASSOC);
+        $balanceId = $row['id'];
+        $currentBalance = $row['balance'];
+    }
+
+    // Business rules
+    if (in_array($type, ['debit','withdrawal'])) {
+        if (bccomp($currentBalance, $amountDecimal, 8) < 0) {
+            $pdo->rollBack();
+            throwApiError(422, 'Insufficient balance');
+        }
+        $delta = bcmul('-1', $amountDecimal, 8);
+    } else {
+        $delta = $amountDecimal; // credit types
+    }
+
+    // Update balance
+    $update = $pdo->prepare('UPDATE balances SET balance = balance + :delta, updated_at = NOW() WHERE id = :id');
+    $update->execute([':delta'=>$delta, ':id'=>$balanceId]);
+
+    // Insert transaction
+    $ins = $pdo->prepare('INSERT INTO transactions (transaction_uuid, user_id, admin_id, asset, amount, type, reference) VALUES (:uuid,:user_id,:admin_id,:asset,:amount,:type,:reference)');
+    $ins->execute([
+      ':uuid'=>$txn_uuid,
+      ':user_id'=>$userId,
+      ':admin_id'=>$user['id'] ?? null,
+      ':asset'=>$asset,
+      ':amount'=>$amountDecimal,
+      ':type'=>$type,
+      ':reference'=>$reference
+    ]);
+    $txnId = $pdo->lastInsertId();
+
+    // Audit log
+    $audit = $pdo->prepare('INSERT INTO audit_logs (admin_id, action, target_type, target_id, meta, ip, user_agent, request_id) VALUES (:admin_id, :action, :t_type, :t_id, :meta, :ip, :ua, :rid)');
+    $meta = json_encode(['amount'=>$amountDecimal, 'asset'=>$asset, 'txn_id'=>$txnId]);
+    $audit->execute([
+      ':admin_id'=>$user['id'] ?? null,
+      ':action'=>'create_transaction',
+      ':t_type'=>'transaction',
+      ':t_id'=>$txnId,
+      ':meta'=>$meta,
+      ':ip'=>$_SERVER['REMOTE_ADDR'] ?? null,
+      ':ua'=>$_SERVER['HTTP_USER_AGENT'] ?? null,
+      ':rid'=>$_SERVER['HTTP_X_REQUEST_ID'] ?? null
+    ]);
+
+    $pdo->commit();
+
+    http_response_code(201);
+    echo json_encode(['transaction_id' => $txnId, 'transaction_uuid' => $txn_uuid]);
+
+} catch (ApiException $e) {
+    if ($pdo && $pdo->inTransaction()) $pdo->rollBack();
+    sendJsonError($e->code, $e->message, $e->details ?? null);
+} catch (Exception $e) {
+    if ($pdo && $pdo->inTransaction()) $pdo->rollBack();
+    sendJsonError(500, 'Internal server error', ['message' => $e->getMessage()]);
+}
+
+
+Key takeaways from the example
+
+Use transaction_uuid to implement idempotency.
+
+SELECT ... FOR UPDATE locks balance row preventing race conditions.
+
+Use bc* or arbitrary precision arithmetic for decimal currency math (PHP bcmath extension).
+
+Always insert audit log within the same transaction or as an atomic separate write. If audit is critical, insert audit before commit (as in sample).
+
+On any exception, roll back and return appropriate error.
+
+8.2 assignDepositAddress.php — SKIP LOCKED (race-safe allocation)
+<?php
+require_once __DIR__ . '/bootstrap.php';
+try {
+    $admin = $auth->requireAdmin();
+    $payload = json_decode(file_get_contents('php://input'), true);
+    $userId = (int)($payload['user_id'] ?? 0);
+    $asset = $payload['asset'] ?? null;
+    if (!$userId || !$asset) throwApiError(400, 'Missing fields');
+
+    $pdo->beginTransaction();
+    // MySQL 8+ supports SKIP LOCKED; if not available, implement an alternate strategy with a status flag
+    $stmt = $pdo->prepare('SELECT id, address FROM deposit_addresses WHERE asset = :asset AND assigned_to IS NULL LIMIT 1 FOR UPDATE SKIP LOCKED');
+    $stmt->execute([':asset'=>$asset]);
+    if ($stmt->rowCount() === 0) {
+        $pdo->rollBack();
+        throwApiError(422, 'No address available');
+    }
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $id = $row['id'];
+    $address = $row['address'];
+
+    $upd = $pdo->prepare('UPDATE deposit_addresses SET assigned_to = :uid, assigned_at = NOW() WHERE id = :id');
+    $upd->execute([':uid'=>$userId, ':id'=>$id]);
+
+    $audit = $pdo->prepare('INSERT INTO audit_logs (admin_id, action, target_type, target_id, meta) VALUES (:admin_id, :action, :t_type, :t_id, :meta)');
+    $audit->execute([':admin_id'=>$admin['id'], ':action'=>'assign_deposit_address', ':t_type'=>'deposit_address', ':t_id'=>$id, ':meta'=>json_encode(['address'=>$address,'asset'=>$asset,'user'=>$userId])]);
+
+    $pdo->commit();
+
+    http_response_code(200);
+    echo json_encode(['address' => $address, 'id' => $id]);
+
+} catch (Exception $e) {
+    if ($pdo && $pdo->inTransaction()) $pdo->rollBack();
+    sendJsonError(500, 'Internal server error');
+}
+
+
+Notes
+
+Use SKIP LOCKED to avoid blocking other workers.
+
+If MySQL version does not support SKIP LOCKED, implement assigned = 0/1 column and UPDATE ... WHERE assigned=0 LIMIT 1 with affected rows check (but that has race conditions without transaction locks).
+
+8.3 approveKyc.php (KYC approval flow)
+<?php
+require_once __DIR__ . '/bootstrap.php';
+try {
+    $admin = $auth->requireAdmin();
+    $payload = json_decode(file_get_contents('php://input'), true);
+    $submission_id = (int)$payload['submission_id'];
+
+    if (!$submission_id) throwApiError(400, 'Missing submission id');
+
+    $pdo->beginTransaction();
+
+    // Fetch submission with lock
+    $s = $pdo->prepare('SELECT * FROM kyc_submissions WHERE id = :id FOR UPDATE');
+    $s->execute([':id'=>$submission_id]);
+    if ($s->rowCount() === 0) {
+        $pdo->rollBack();
+        throwApiError(404, 'KYC submission not found');
+    }
+    $submission = $s->fetch(PDO::FETCH_ASSOC);
+
+    if ($submission['status'] !== 'pending') {
+        $pdo->rollBack();
+        throwApiError(422, 'Submission already decided');
+    }
+
+    // Approve
+    $up = $pdo->prepare('UPDATE kyc_submissions SET status = "approved", decided_at = NOW(), decided_by = :admin WHERE id = :id');
+    $up->execute([':admin'=>$admin['id'], ':id'=>$submission_id]);
+
+    // Update user verified_status
+    $u = $pdo->prepare('UPDATE users SET verified_status = 1 WHERE id = :uid');
+    $u->execute([':uid'=>$submission['user_id']]);
+
+    // Create notification
+    $insN = $pdo->prepare('INSERT INTO notifications (user_id, title, message) VALUES (:uid, :title, :message)');
+    $insN->execute([
+      ':uid'=>$submission['user_id'],
+      ':title'=>'KYC Verified',
+      ':message'=>'Your identity documents have been verified.'
+    ]);
+
+    // Audit log
+    $audit = $pdo->prepare('INSERT INTO audit_logs (admin_id, action, target_type, target_id, meta) VALUES (:admin, :act, :type, :tid, :meta)');
+    $audit->execute([':admin'=>$admin['id'], ':act'=>'approve_kyc', ':type'=>'kyc_submission', ':tid'=>$submission_id, ':meta'=>json_encode(['submission_id'=>$submission_id])]);
+
+    $pdo->commit();
+
+    http_response_code(200);
+    echo json_encode(['ok'=>true]);
+
+} catch (Exception $e) {
+    if ($pdo && $pdo->inTransaction()) $pdo->rollBack();
+    sendJsonError(500, 'Internal server error');
+}
+
+
+Notes
+
+KYC file storage should use secure S3 bucket; document_url should be a reference to S3 object (not the raw file content).
+
+Consider asynchronous human review with background job to OCR/verify documents.
+
+9. Defensive designs & concurrency (explicit patterns)
+
+Atomic balance updates: Always hold a DB transaction and SELECT ... FOR UPDATE the balances row. This prevents race conditions when two admins try to change the same user's balance.
+
+Idempotency: For any operation that creates a resource (transaction, card issuance, address assign), require transaction_uuid or Idempotency-Key. Server stores transaction_uuid in the created resource and rejects conflicting retries.
+
+SKIP LOCKED: For allocation (deposit addresses, ticket assignment), use FOR UPDATE SKIP LOCKED to allow multiple workers without deadlocking.
+
+Optimistic updates: For non-critical UI updates, implement optimistic UI with rollback on error (client uses response to confirm).
+
+Dead letter queue: For failed background jobs, use DLQ and retry policy.
+
+10. File uploads & KYC (complete workflow)
+
+Upload process (client):
+
+Client obtains a short-lived presigned S3 upload URL from /api/kyc/presignUpload.php (server checks user & auth).
+
+Client PUTs file directly to S3 using the presigned URL. This avoids storing binary in PHP and reduces load.
+
+Client calls /api/kyc/submit.php with the S3 object key and metadata.
+
+Server process:
+
+presignUpload.php verifies admin/ user is allowed, generates presigned URL (AWS SDK), returns object key & URL.
+
+submit.php inserts a row in kyc_submissions with document_url the S3 key, sets status pending.
+
+Background worker downloads object from S3 for scanning (ClamAV) and optionally OCR/ID verification.
+
+Worker adds tag to submission (e.g., scanned=true), or creates a task for manual review.
+
+Security and retention:
+
+Keep KYC objects private in S3; use server-side encryption (SSE-S3 or KMS).
+
+Set retention policy; purge after required retention period unless flagged for compliance.
+
+Log every download/access in audit_logs.
+
+11. CSV Import/Export (practical & safe)
+
+Export
+
+Do not generate huge CSVs synchronously. For large datasets, queue export and generate file as background job. Return a job_id and provide /api/exportStatus.php?jobId=....
+
+Use memory-efficient streaming (fputcsv to output buffer in chunks).
+
+Import
+
+Client uploads CSV file via presigned S3 or direct upload.
+
+Server validates file header and sample rows synchronously (first N rows).
+
+Create import job and enqueue a background worker for bulk processing.
+
+Worker performs row-level validation and inserts in batches using prepared statements and INSERT ... ON DUPLICATE KEY UPDATE where appropriate.
+
+Produce a per-row result log with success|failed and reason, and return to admin UI.
+
+Idempotency for import
+
+Prevent duplicate imports via import_hash and Idempotency-Key; if same file re-uploaded, mark as duplicate and skip.
+
+12. Real-time updates: design options & code approach
+
+Option A — WebSockets (recommended for instant updates)
+
+Setup a small NodeJS or PHP (Ratchet) WebSocket server.
+
+When PHP writes to DB, also publish event to Redis PUBLISH "events" '{...}'.
+
+WebSocket server subscribes to Redis; when event arrives, push to connected clients.
+
+Client subscribes to WebSocket channel and updates UI.
+
+Option B — Server-Sent Events (SSE)
+
+Simpler to implement but only server→client pushes. Use SSE for read-only streaming.
+
+Option C — Polling
+
+Poll endpoints such as /getNotifications.php every N seconds — simplest but heavier.
+
+Implementation note: for horizontal scaling, use Redis as central pub/sub broker.
+
+13. Background jobs & queues (recommended tasks for queue)
+
+CSV import and export generation
+
+KYC file scanning / OCR
+
+Sending emails
+
+External API retries
+
+Long running reconciliation tasks
+
+Use Redis, RabbitMQ, or a managed queue. Use supervisor (systemd) to run worker processes.
+
+14. Observability, logs, and metrics
+
+Logging
+
+Use structured JSON logs. Include timestamp, level, request_id, admin_id, route, duration_ms, error.
+
+Centralize logs to ELK/Opensearch or a logging SaaS.
+
+Error tracking: Sentry (capture exceptions with breadcrumbs).
+
+Metrics
+
+Expose /health and /metrics.
+
+Track request rate, error rate, DB connection usage, queue length, background job success/failure.
+
+Alerting
+
+Alert on high 5xx rate, high queue growth, backup failures, backup size anomalies, high CPU or memory.
+
+15. Backups & DR (explicit plan)
+
+Daily full backup: mysqldump (or physical snapshot) to S3; keep 30-day retention.
+
+Binlog-based PITR: enable binary logs and support point-in-time recovery.
+
+Test restores monthly: run a restore to a staging DB and run smoke tests.
+
+Encrypt backups at rest via SSE-KMS.
+
+Automated backup script with rotation and monitoring.
+
+16. Migration & schema changes (zero-downtime guidance)
+
+Use migration tool (Phinx, Flyway, Laravel migrations).
+
+Zero-downtime pattern:
+
+Add columns nullable.
+
+Deploy code that writes to new and old columns.
+
+Backfill data with scripts.
+
+Switch reads to new column.
+
+Make old column nullable and later drop.
+
+Avoid ALTER TABLE ... ALTER COLUMN that locks table for large rows; use pt-online-schema-change for MySQL if needed.
+
+17. Testing & QA (explicit test plan)
+
+Unit tests for services (PHPUnit).
+
+Integration tests for endpoints, including DB tests (transaction rollback after each test).
+
+Load testing for critical paths (createTransaction, assignDepositAddress).
+
+Concurrency tests: run multiple concurrent transactions on same user and assert balances are always consistent.
+
+E2E tests: Cypress or Playwright for the UI flows (login, KYC approve, issue card, create transaction).
+
+Penetration tests & vulnerability scan: run static code analysis and run OWASP ZAP scans.
+
+QA checklist (derived from your earlier mock checklist and expanded):
+
+UI unchanged visually.
+
+Prices updated from external source (if used).
+
+Tables load via API (no hardcoded arrays).
+
+Transactions update balances atomically.
+
+KYC flow: pending → approve/reject triggers notification & audit log.
+
+Cards enforce max 3.
+
+Deposit addresses assigned uniquely.
+
+Notifications persist until read.
+
+Fees deduction validated.
+
+CSV import/export verified with edge cases.
+
+Password resets are secure; no plaintext password view without encryption + strict audit.
+
+Audit logs record every admin action.
+
+18. Performance & indexes (explicit recommendations)
+
+Indexes:
+
+transactions (user_id, created_at) for history queries.
+
+balances (user_id, asset) with unique constraint for fast lookup.
+
+audit_logs (created_at, admin_id).
+
+Fulltext indexes only where necessary.
+
+Use read replicas for read-heavy queries (users listing, transaction history) and route reads to replicas while writes go to primary.
+
+Redis caching for crypto prices, computed aggregates.
+
+19. Compliance & privacy
+
+PII minimization: avoid storing unnecessary data; use retention policies.
+
+Provide an admin way to export user data (for DSAR) and to anonymize/deactivate accounts as required by GDPR.
+
+Maintain logs of data access for compliance audits.
+
+20. Operational checklist before production
+
+TLS certs installed and renewing (Let's Encrypt or commercial).
+
+Env secrets injected from secret manager.
+
+Automated migrations applied through CI pipeline with migration checks.
+
+Backups scheduled and restore tested.
+
+Load tests run at ~2–3x expected load.
+
+Security scans completed.
+
+Logging/metrics in place (Sentry, Grafana, Prometheus).
+
+Health checks and endpoints available.
+
+Alerts set for 5xx spike, queue length, backup failure, CPU/memory.
+
+21. Appendix — Extra code & helper functions
+21.1 recordAuditLog($pdo, $adminId, $action, $targetType, $targetId, $meta)
+function recordAuditLog($pdo, $adminId, $action, $targetType, $targetId, $meta = null) {
+    $stmt = $pdo->prepare('INSERT INTO audit_logs (admin_id, action, target_type, target_id, meta, ip, user_agent, request_id) VALUES (:admin, :action, :t_type, :t_id, :meta, :ip, :ua, :rid)');
+    $stmt->execute([
+      ':admin'=>$adminId,
+      ':action'=>$action,
+      ':t_type'=>$targetType,
+      ':t_id'=>$targetId,
+      ':meta'=>is_null($meta)?null:json_encode($meta),
+      ':ip'=>$_SERVER['REMOTE_ADDR'] ?? null,
+      ':ua'=>$_SERVER['HTTP_USER_AGENT'] ?? null,
+      ':rid'=>$_SERVER['HTTP_X_REQUEST_ID'] ?? null
+    ]);
+}
+
+21.2 Idempotency middleware (pseudo)
+
+For POST /createTransaction.php:
+
+Check Idempotency-Key header. If exists and seen, return previous result.
+
+If not seen, insert placeholder in idempotency_keys table with status=processing, proceed. On success update status=completed and store response. If processing times out, consider a TTL.
+
+idempotency_keys table
+
+CREATE TABLE idempotency_keys (
+  key_hash CHAR(64) PRIMARY KEY,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  status ENUM('processing','completed','failed') NOT NULL,
+  response_json JSON NULL
+);
+
+22. Migration notes from mock DB (explicit)
+
+Your previous mock used window.__mockDB and setTimeout to simulate latency. Migration steps:
+
+Replace every direct mock usage with adminApi.js call.
+
+Implement server-side endpoint for each mocked function (API names match your existing adminApi.js functions — making replacement straightforward). Example mapping:
+
+getUsers() → /api/getUsers.php
+
+createTransaction() → /api/createTransaction.php
+
+approveKyc() → /api/approveKyc.php
+
+etc. (the full mapping is listed earlier).
+
+Run integration tests between UI and API to ensure request/response contract parity.
+
+Remove any remaining direct access to window.__mockDB.
+
+(Your mock spec described the behaviors and endpoints — see your original doc for the mock behavior expectations.) 
+
+Documantation
+
+23. Example: Full transaction trace (what happens step-by-step)
+
+Admin UI triggers createTransaction({transaction_uuid, user_id, asset, amount, type}) via adminApi.js → POST /api/createTransaction.php
+
+adminApi.js attaches Authorization header + X-Request-ID and Idempotency-Key = transaction_uuid.
+
+PHP createTransaction:
+
+Validate token & authorize admin.
+
+Validate payload and check transactions for transaction_uuid (idempotency).
+
+Start DB transaction.
+
+SELECT balance FROM balances WHERE user_id = :userId AND asset = :asset FOR UPDATE.
+
+Validate sufficient funds.
+
+UPDATE balances SET balance = balance + delta.
+
+INSERT INTO transactions (...).
+
+INSERT INTO audit_logs(...).
+
+COMMIT.
+
+Response returned 201 Created { transaction_id, transaction_uuid }.
+
+adminApi.js resolves the promise; UI updates table (optionally optimistic UI already updated earlier).
+
+Worker(s) may pick up event to propagate via Redis → WebSocket → clients (real-time).
+
+24. Final production hardening checklist (very explicit)
+
+ Use Argon2id for password hashing.
+
+ JWT secret at least 256 bits random; rotate periodically.
+
+ Access tokens TTL small (e.g., 15–30m), use refresh tokens with server-side revocation.
+
+ HTTPS everywhere; HSTS.
+
+ DB user has minimal privileges.
+
+ All DB writes are parameterized queries.
+
+ All critical operations use transactions & locks where applicable.
+
+ Implement idempotency keys for all state-changing POSTs.
+
+ Perform concurrency tests to validate locking strategies.
+
+ Implement background jobs and monitor queue length.
+
+ Run scheduled backups + PITR and test restores.
+
+ Implement S3 encryption for KYC files and access auditing.
+
+ Implement structured logs and error tracking.
+
+ Set up alerts for errors, backups, queue growth.
+
+ Disable any viewPassword operation or protect it behind strict encryption + KMS + audit + multiple admin confirmations (preferably never).
+
+ Apply least-privilege on S3 buckets, rotate keys.
+
+ Use DB migrations and apply them from CI/CD.
+
+ Use feature flags for dangerous features.
+
+ Implement thorough E2E tests and run them in CI pipeline as part of merge checks.
+
+25. Closing (very direct next steps you can copy/run)
+
+If you want, I will:
+
+Generate a complete adminApi.js file wired to your exact PHP endpoint names (I gave a full example above — I can tailor it to your base URL or coding style).
+
+Produce real PHP endpoint templates for every function in your original mock (I gave the most critical ones above; I can produce the rest: getUsers, getCards, getNotifications, getFees, export/import).
+
+Produce SQL migration scripts (one file) ready to run to create the database schema above.
+
+Produce unit tests / integration test skeletons (PHPUnit, Postman collection).
+
+Tell me which of those you want generated next — I can produce any of them in full in this conversation (js file, php files, or sql dump) — or I can generate them all.

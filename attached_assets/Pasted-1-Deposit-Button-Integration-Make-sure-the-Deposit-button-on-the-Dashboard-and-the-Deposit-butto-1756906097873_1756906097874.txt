@@ -1,0 +1,80 @@
+1. Deposit Button Integration
+
+Make sure the Deposit button on the Dashboard and the Deposit button in the Crypto Assets table trigger the exact same deposit modal.
+
+Both buttons should:
+
+Open the same modal (deposit-modal).
+
+Call the same function to handle deposit logic.
+
+No duplication of logic — one modal, one shared function.
+
+2. Deposit Modal Behavior
+
+Inside the modal:
+
+A dropdown to select the asset (Bitcoin, Ethereum, etc.).
+
+Display the currently active deposit address for the selected asset.
+
+A QR code generated for the active address (must be functional when scanned).
+
+A button Generate New Address that cycles/shuffles through available addresses for that asset.
+
+Use currentAddressIndex to keep track of which address is currently being displayed.
+
+Every click moves to the next address in the pool.
+
+When the end is reached, cycle back to the first one.
+
+3. Crypto Address Management
+
+Add an Admin Panel feature to allow the admin to add deposit addresses.
+
+For each asset:
+
+Store at least 3 deposit addresses in an array.
+
+These addresses are saved in the cryptoData object, e.g.:
+
+let cryptoData = [
+  { 
+    id: 'bitcoin', 
+    asset: 'Bitcoin', 
+    ticker: 'BTC', 
+    addresses: [
+      "address1",
+      "address2",
+      "address3"
+    ]
+  },
+  ...
+];
+
+
+The Deposit Modal should always pull deposit addresses from this array.
+
+The Generate New Address button cycles through this array.
+
+The QR code updates automatically with the currently displayed address.
+
+4. QR Code Generation
+
+Use a QR code library (already included in the project) to render the QR code.
+
+The QR code should:
+
+Be generated dynamically from the currently displayed deposit address.
+
+Be fully functional — when scanned, it resolves to the correct crypto address.
+
+Goal
+
+Both Dashboard Deposit button and Crypto Assets table Deposit button → open the same deposit modal with full logic.
+
+Admin can preload addresses (at least 3 per asset).
+
+Clients can cycle through them with Generate New Address.
+
+A QR code is always shown and updates per address.
